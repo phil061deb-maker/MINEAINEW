@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { NsfwGateModal } from "@/components/nsfw/NsfwGateModal";
 
 type Me = {
   loggedIn: boolean;
@@ -30,6 +31,8 @@ export default function ProfilePage() {
 
   const [is18, setIs18] = useState(false);
   const [nsfw, setNsfw] = useState(false);
+
+  const [modalOpen, setModalOpen] = useState(false);
 
   async function loadMe() {
     setLoading(true);
@@ -84,7 +87,22 @@ export default function ProfilePage() {
 
   return (
     <div className="space-y-6 max-w-3xl">
-      
+      {/* NSFW MODAL */}
+      <NsfwGateModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        initial18={!!me.is_18_confirmed}
+        initialNsfw={!!me.nsfw_enabled}
+        onSaved={(next18, nextNsfw) => {
+          // Keep UI in sync after saving in modal
+          setIs18(next18);
+          setNsfw(nextNsfw);
+          setMe((prev) =>
+            prev ? { ...prev, is_18_confirmed: next18, nsfw_enabled: nextNsfw } : prev
+          );
+        }}
+      />
+
       {/* HEADER */}
       <div className="card p-6">
         <h1 className="text-3xl font-semibold">Your Profile</h1>
@@ -126,7 +144,21 @@ export default function ProfilePage() {
 
       {/* NSFW SETTINGS */}
       <div className="card p-6 space-y-5">
-        <h2 className="text-lg font-semibold">NSFW Access</h2>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold">NSFW Access</h2>
+            <p className="text-sm text-zinc-400 mt-1">
+              You must confirm 18+ and save before NSFW chats are allowed.
+            </p>
+          </div>
+
+          <button
+            onClick={() => setModalOpen(true)}
+            className="px-4 py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
+          >
+            Open Popup
+          </button>
+        </div>
 
         {/* 18+ */}
         <label className="flex items-start gap-3">
@@ -137,19 +169,12 @@ export default function ProfilePage() {
             onChange={(e) => {
               const value = e.target.checked;
               setIs18(value);
-
-              // Force disable NSFW if 18+ turned off
-              if (!value) {
-                setNsfw(false);
-              }
+              if (!value) setNsfw(false);
             }}
           />
 
           <div>
-            <div className="font-medium">
-              I confirm that I am 18 years or older
-            </div>
-
+            <div className="font-medium">I confirm that I am 18 years or older</div>
             <div className="text-sm text-zinc-400">
               Required before enabling NSFW chats.
             </div>
@@ -157,11 +182,7 @@ export default function ProfilePage() {
         </label>
 
         {/* NSFW toggle */}
-        <label
-          className={`flex items-start gap-3 ${
-            !is18 ? "opacity-40 pointer-events-none" : ""
-          }`}
-        >
+        <label className={`flex items-start gap-3 ${!is18 ? "opacity-40 pointer-events-none" : ""}`}>
           <input
             type="checkbox"
             className="mt-1"
@@ -171,21 +192,12 @@ export default function ProfilePage() {
           />
 
           <div>
-            <div className="font-medium">
-              Enable NSFW characters & chats
-            </div>
-
-            <div className="text-sm text-zinc-400">
-              You MUST save after changing this.
-            </div>
+            <div className="font-medium">Enable NSFW characters & chats</div>
+            <div className="text-sm text-zinc-400">You MUST save after changing this.</div>
           </div>
         </label>
 
-        <button
-          onClick={saveSettings}
-          disabled={saving}
-          className="btn-primary"
-        >
+        <button onClick={saveSettings} disabled={saving} className="btn-primary">
           {saving ? "Saving..." : "Save Settings"}
         </button>
 
