@@ -9,7 +9,7 @@ type Me =
   | { loggedIn: false }
   | { loggedIn: true; email: string | null; displayName: string | null; tier: "free" | "premium" | "admin" | string };
 
-function useOutsideClick(ref: React.RefObject<HTMLElement>, onOutside: () => void) {
+function useOutsideClick(ref: React.RefObject<HTMLElement | null>, onOutside: () => void) {
   useEffect(() => {
     function handler(e: MouseEvent) {
       const el = ref.current;
