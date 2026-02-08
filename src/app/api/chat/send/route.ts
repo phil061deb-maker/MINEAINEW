@@ -59,12 +59,16 @@ export async function POST(req: Request) {
 
     // Load profile tier/trial for limits
     const { data: profile, error: profErr } = await supabase
-      .from("profiles")
-      .select("id,tier,trial_ends_at,premium_ends_at,email")
-      .eq("id", user.id)
-      .single();
+  .from("profiles")
+  .select("id,tier,trial_ends_at,premium_ends_at,email,is_blocked")
+  .eq("id", user.id)
+  .single();
+
 
     if (profErr || !profile) return NextResponse.json({ error: "profile_missing" }, { status: 500 });
+    if (profile.is_blocked) {
+  return NextResponse.json({ error: "blocked" }, { status: 403 });
+}
 
     const premiumAccess = hasPremiumAccess(profile);
 
