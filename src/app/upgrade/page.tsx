@@ -4,6 +4,29 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+async function startSubscription(plan: "monthly" | "yearly") {
+  try {
+    const res = await fetch("/api/paypal/subscription/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan }),
+    });
+
+    const json = await res.json();
+
+    if (!json?.approveUrl) {
+      alert("Failed to start subscription");
+      return;
+    }
+
+    // Redirect user to PayPal checkout
+    window.location.href = json.approveUrl;
+
+  } catch (err) {
+    console.error(err);
+    alert("Subscription error");
+  }
+}
 
 type Me =
   | { loggedIn: false }
@@ -181,11 +204,12 @@ export default function UpgradePage() {
             </div>
 
             <button
-              onClick={() => startPaypal("monthly")}
-              className="mt-6 w-full px-5 py-3 rounded-2xl bg-amber-500 text-black hover:bg-amber-400 font-semibold"
-            >
-              Choose Monthly
-            </button>
+  onClick={() => startSubscription("monthly")}
+  className="btn-primary w-full"
+>
+  Subscribe Monthly — $10
+</button>
+
           </div>
 
           <div className="rounded-[24px] border border-amber-500/25 bg-amber-500/10 p-6">
@@ -209,11 +233,12 @@ export default function UpgradePage() {
             </div>
 
             <button
-              onClick={() => startPaypal("yearly")}
-              className="mt-6 w-full px-5 py-3 rounded-2xl bg-amber-500 text-black hover:bg-amber-400 font-semibold"
-            >
-              Choose Yearly
-            </button>
+  onClick={() => startSubscription("yearly")}
+  className="btn-primary w-full"
+>
+  Subscribe Yearly — $80 (Save $40)
+</button>
+
           </div>
         </div>
       </section>
