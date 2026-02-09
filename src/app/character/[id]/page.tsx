@@ -1,7 +1,16 @@
 import Link from "next/link";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import ChatStartButton from "@/components/chat/ChatStartButton";
-import { getCharacterImage } from "@/lib/supabase/storage";
+
+function publicImageUrl(path: string | null) {
+  if (!path) return null;
+
+  // ✅ If you already stored a full URL in image_path, just use it
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+
+  const base = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  return `${base}/storage/v1/object/public/character-images/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
+}
 
 export default async function CharacterDetailPage({ params }: { params: { id: string } }) {
   const supabase = await createSupabaseServerClient();
@@ -26,7 +35,7 @@ export default async function CharacterDetailPage({ params }: { params: { id: st
     );
   }
 
-  const img = getCharacterImage(c.image_path ?? null);
+  const img = publicImageUrl(c.image_path ?? null);
 
   return (
     <div className="space-y-6">

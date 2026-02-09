@@ -5,20 +5,17 @@ import { useState } from "react";
 
 export default function ChatStartButton({
   characterId,
-  className = "btn-primary flex-1 text-center",
-  children = "Chat",
+  className,
 }: {
   characterId: string;
   className?: string;
-  children?: React.ReactNode;
 }) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
 
-  async function go() {
+  async function start() {
+    setLoading(true);
     try {
-      setLoading(true);
-
       const res = await fetch("/api/chat/ensure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -26,22 +23,23 @@ export default function ChatStartButton({
       });
 
       const json = await res.json();
-
       if (!res.ok) {
-        alert(json?.error ?? "Failed to start chat");
+        alert(json?.error ?? "failed_to_start_chat");
+        setLoading(false);
         return;
       }
 
       router.push(`/chat/${json.chatId}`);
       router.refresh();
-    } finally {
-      setLoading(false);
+    } catch {
+      alert("network_error");
     }
+    setLoading(false);
   }
 
   return (
-    <button onClick={go} disabled={loading} className={className}>
-      {loading ? "Starting..." : children}
+    <button onClick={start} disabled={loading} className={className ?? "btn-primary"}>
+      {loading ? "Starting..." : "Chat"}
     </button>
   );
 }
