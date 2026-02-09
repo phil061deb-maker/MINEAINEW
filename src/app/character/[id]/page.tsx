@@ -1,12 +1,7 @@
 import Link from "next/link";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import ChatStartButton from "@/components/chat/ChatStartButton";
-
-function publicImageUrl(path: string | null) {
-  if (!path) return null;
-  const base = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  return `${base}/storage/v1/object/public/character-images/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
-}
+import { getCharacterImage } from "@/lib/supabase/storage";
 
 export default async function CharacterDetailPage({ params }: { params: { id: string } }) {
   const supabase = await createSupabaseServerClient();
@@ -31,7 +26,7 @@ export default async function CharacterDetailPage({ params }: { params: { id: st
     );
   }
 
-  const img = publicImageUrl(c.image_path ?? null);
+  const img = getCharacterImage(c.image_path ?? null);
 
   return (
     <div className="space-y-6">
@@ -61,7 +56,7 @@ export default async function CharacterDetailPage({ params }: { params: { id: st
                 Back
               </Link>
 
-              {/* ✅ FIXED: start chat properly (ensure -> chatId) */}
+              {/* Start chat properly (ensure -> chatId -> /chat/[chatId]) */}
               <ChatStartButton characterId={c.id} className="btn-primary" />
             </div>
           </div>
