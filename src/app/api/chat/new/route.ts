@@ -14,10 +14,8 @@ export async function POST(req: Request) {
 
     if (!characterId) return NextResponse.json({ error: "missing_characterId" }, { status: 400 });
 
-    // Optional: if you later want to carry persona, you can pass personaId
     const personaId = body?.personaId?.toString?.() ?? null;
 
-    // Create brand new chat (keeps old chats)
     const { data: newChat, error: newErr } = await supabase
       .from("chats")
       .insert({

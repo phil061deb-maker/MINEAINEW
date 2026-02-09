@@ -10,50 +10,43 @@ function publicImageUrl(path: string | null) {
   return `${base}/storage/v1/object/public/character-images/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
 }
 
-type Msg = { role: "user" | "assistant"; content: string };
+type ChatRow = {
+  id: string;
+  user_id: string;
+  character_id: string;
+  persona_id: string | null;
+  title: string | null;
+};
+
+type HeaderState = {
+  name: string;
+  image: string | null;
+  characterId: string;
+  personaId: string | null;
+};
 
 export default function ChatPage() {
   const params = useParams<{ chatId: string }>();
-  const characterId = params?.chatId; // IMPORTANT: this is a CHARACTER id from the URL
+  const chatId = params?.chatId;
+
   const router = useRouter();
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
 
   const [loading, setLoading] = useState(true);
 
-  // The REAL chat id (created/found by /api/chat/ensure)
-  const [chatUuid, setChatUuid] = useState<string | null>(null);
+  const [chatMeta, setChatMeta] = useState<ChatRow | null>(null);
+  const [header, setHeader] = useState<HeaderState | null>(null);
 
-  const [header, setHeader] = useState<{ name: string; image: string | null } | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
+
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
 
-  async function loadHistory(usingChatId: string) {
-    setHistoryError(null);
-
-    try {
-      const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(usingChatId)}`, { cache: "no-store" });
-      const json = await res.json();
-
-      if (!res.ok) {
-        setHistoryError(json?.error ?? "history_failed");
-        setMessages([]);
-        return;
-      }
-
-      setMessages(Array.isArray(json?.messages) ? json.messages : []);
-    } catch {
-      setHistoryError("history_failed");
-      setMessages([]);
-    }
-  }
-
-  async function boot() {
+  async function loadChat() {
     setLoading(true);
     setHistoryError(null);
 
-    // Must be logged in
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) {
       setLoading(false);
@@ -61,41 +54,60 @@ export default function ChatPage() {
       return;
     }
 
-    // 1) Ensure chat exists for this character
-    try {
-      const res = await fetch("/api/chat/ensure", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ characterId }),
-      });
+    // 1) Load chat row
+    const { data: chat, error: chatErr } = await supabase
+      .from("chats")
+      .select("id,user_id,character_id,persona_id,title")
+      .eq("id", chatId)
+      .single();
 
+    if (chatErr || !chat) {
+      setHistoryError("chat_not_found");
+      setChatMeta(null);
+      setHeader(null);
+      setMessages([]);
+      setLoading(false);
+      return;
+    }
+
+    if (chat.user_id !== auth.user.id) {
+      setHistoryError("not_allowed");
+      setChatMeta(null);
+      setHeader(null);
+      setMessages([]);
+      setLoading(false);
+      return;
+    }
+
+    setChatMeta(chat as ChatRow);
+
+    // 2) Load character for header (name + image)
+    const { data: character } = await supabase
+      .from("characters")
+      .select("name,image_path")
+      .eq("id", chat.character_id)
+      .single();
+
+    setHeader({
+      name: character?.name ?? chat.title ?? "Chat",
+      image: publicImageUrl(character?.image_path ?? null),
+      characterId: chat.character_id,
+      personaId: chat.persona_id ?? null,
+    });
+
+    // 3) Load history via API
+    try {
+      const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(chatId!)}`, { cache: "no-store" });
       const json = await res.json();
 
       if (!res.ok) {
-        setHistoryError(json?.error ?? "ensure_failed");
-        setHeader(null);
-        setChatUuid(null);
+        setHistoryError(json?.error ?? "history_failed");
         setMessages([]);
-        setLoading(false);
-        return;
+      } else {
+        setMessages(Array.isArray(json?.messages) ? json.messages : []);
       }
-
-      const ensuredChatId = json?.chatId as string;
-      const character = json?.character;
-
-      setChatUuid(ensuredChatId);
-
-      setHeader({
-        name: character?.name ?? "Chat",
-        image: publicImageUrl(character?.image_path ?? null),
-      });
-
-      // 2) Load history for this chat
-      await loadHistory(ensuredChatId);
     } catch {
-      setHistoryError("ensure_failed");
-      setHeader(null);
-      setChatUuid(null);
+      setHistoryError("history_failed");
       setMessages([]);
     }
 
@@ -103,14 +115,14 @@ export default function ChatPage() {
   }
 
   useEffect(() => {
-    if (!characterId) return;
-    boot();
+    if (!chatId) return;
+    loadChat();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [characterId]);
+  }, [chatId]);
 
   async function send() {
     const text = input.trim();
-    if (!text || !chatUuid) return;
+    if (!text) return;
 
     setSending(true);
     setInput("");
@@ -122,7 +134,7 @@ export default function ChatPage() {
       const res = await fetch("/api/chat/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId: chatUuid, message: text }),
+        body: JSON.stringify({ chatId, message: text }),
       });
 
       const json = await res.json();
@@ -130,8 +142,13 @@ export default function ChatPage() {
       if (!res.ok) {
         setMessages((m) => [...m, { role: "assistant", content: `Error: ${json?.error ?? "send_failed"}` }]);
       } else {
-        const reply = json?.assistantMessage ?? json?.reply ?? "…";
-        setMessages((m) => [...m, { role: "assistant", content: reply }]);
+        if (json?.assistantMessage) {
+          setMessages((m) => [...m, { role: "assistant", content: json.assistantMessage }]);
+        } else if (json?.reply) {
+          setMessages((m) => [...m, { role: "assistant", content: json.reply }]);
+        } else {
+          setMessages((m) => [...m, { role: "assistant", content: "✅ Message saved." }]);
+        }
       }
     } catch {
       setMessages((m) => [...m, { role: "assistant", content: "Network error sending message." }]);
@@ -141,20 +158,30 @@ export default function ChatPage() {
   }
 
   async function newChat() {
-    if (!chatUuid) return;
+    // We MUST have characterId to create a new chat
+    if (!header?.characterId) {
+      alert("missing_characterId");
+      return;
+    }
 
     const res = await fetch("/api/chat/new", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chatId: chatUuid, keepPersona: true }),
+      body: JSON.stringify({
+        characterId: header.characterId,
+        personaId: header.personaId, // keeps persona if there is one
+      }),
     });
 
     const json = await res.json();
-    if (!res.ok) return alert(json?.error ?? "failed");
+    if (!res.ok) {
+      alert(json?.error ?? "failed");
+      return;
+    }
 
-    const newId = json?.chatId as string;
-    setChatUuid(newId);
-    await loadHistory(newId);
+    // ✅ Go to the NEW chat
+    router.push(`/chat/${json.chatId}`);
+    router.refresh();
   }
 
   if (loading) {
@@ -167,6 +194,7 @@ export default function ChatPage() {
 
   return (
     <div className="space-y-4">
+      {/* HEADER BAR */}
       <div className="rounded-[28px] border border-white/10 bg-black/30 backdrop-blur-xl p-5 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
           <div className="h-11 w-11 rounded-2xl border border-white/10 bg-white/5 overflow-hidden grid place-items-center">
@@ -181,7 +209,9 @@ export default function ChatPage() {
           <div className="min-w-0">
             <div className="text-xs text-zinc-400">Chatting with</div>
             <div className="font-semibold truncate">{header?.name ?? "Chat"}</div>
-            {historyError && <div className="text-xs text-amber-300 mt-1">History error: {historyError}</div>}
+            {historyError && (
+              <div className="text-xs text-amber-300 mt-1">History error: {historyError}</div>
+            )}
           </div>
         </div>
 
@@ -206,6 +236,7 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {/* CHAT BODY */}
       <div className="rounded-[28px] border border-white/10 bg-black/30 backdrop-blur-xl p-5 min-h-[420px]">
         <div className="space-y-4">
           {messages.map((m, idx) => (
@@ -222,10 +253,13 @@ export default function ChatPage() {
             </div>
           ))}
 
-          {!messages.length && <div className="text-zinc-400 text-sm">Say hi 👋</div>}
+          {!messages.length && (
+            <div className="text-zinc-400 text-sm">Say hi 👋</div>
+          )}
         </div>
       </div>
 
+      {/* INPUT */}
       <div className="rounded-[28px] border border-white/10 bg-black/30 backdrop-blur-xl p-4 flex items-center gap-3">
         <input
           className="w-full bg-transparent outline-none text-zinc-100 placeholder:text-zinc-500 px-3 py-2 rounded-2xl border border-white/10 bg-white/5"
@@ -240,6 +274,7 @@ export default function ChatPage() {
           }}
           disabled={sending}
         />
+
         <button
           className="px-6 py-3 rounded-2xl bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-60"
           onClick={send}
