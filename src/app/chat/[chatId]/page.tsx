@@ -3,12 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-
-function publicImageUrl(path: string | null) {
-  if (!path) return null;
-  const base = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  return `${base}/storage/v1/object/public/character-images/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
-}
+import { getCharacterImage } from "@/lib/supabase/storage";
 
 export default function ChatPage() {
   const params = useParams<{ chatId: string }>();
@@ -17,17 +12,13 @@ export default function ChatPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
 
   const [loading, setLoading] = useState(true);
-  const [header, setHeader] = useState<{ name: string; image: string | null } | null>(null);
+  const [header, setHeader] = useState<{ name: string; image: string | null; characterId: string | null } | null>(null);
 
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-
-  // ✅ we need these so New Chat can work
-  const [characterId, setCharacterId] = useState<string | null>(null);
-  const [personaId, setPersonaId] = useState<string | null>(null);
 
   async function loadChat() {
     setLoading(true);
@@ -40,6 +31,7 @@ export default function ChatPage() {
       return;
     }
 
+    // Fetch chat
     const { data: chat, error: chatErr } = await supabase
       .from("chats")
       .select("id, user_id, character_id, persona_id, title")
@@ -62,23 +54,23 @@ export default function ChatPage() {
       return;
     }
 
-    setCharacterId(chat.character_id);
-    setPersonaId(chat.persona_id ?? null);
-
     const { data: character } = await supabase
       .from("characters")
-      .select("name,image_path")
+      .select("id,name,image_path")
       .eq("id", chat.character_id)
       .single();
 
     setHeader({
       name: character?.name ?? chat.title ?? "Chat",
-      image: publicImageUrl(character?.image_path ?? null),
+      image: getCharacterImage(character?.image_path ?? null),
+      characterId: character?.id ?? chat.character_id ?? null,
     });
 
+    // Load history
     try {
       const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(chatId)}`, { cache: "no-store" });
       const json = await res.json();
+
       if (!res.ok) {
         setHistoryError(json?.error ?? "history_failed");
         setMessages([]);
@@ -112,8 +104,7 @@ export default function ChatPage() {
       const res = await fetch("/api/chat/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // ✅ your API supports message/content — we send content
-        body: JSON.stringify({ chatId, content: text }),
+        body: JSON.stringify({ chatId, content: text }), // IMPORTANT: send `content`
       });
 
       const json = await res.json();
@@ -121,44 +112,13 @@ export default function ChatPage() {
       if (!res.ok) {
         setMessages((m) => [...m, { role: "assistant", content: `Error: ${json?.error ?? "send_failed"}` }]);
       } else {
-        if (json?.assistantMessage) {
-          setMessages((m) => [...m, { role: "assistant", content: json.assistantMessage }]);
-        } else if (json?.reply) {
-          setMessages((m) => [...m, { role: "assistant", content: json.reply }]);
-        } else {
-          setMessages((m) => [...m, { role: "assistant", content: "…(no reply returned)" }]);
-        }
+        setMessages((m) => [...m, { role: "assistant", content: json?.assistantMessage ?? json?.reply ?? "…" }]);
       }
     } catch {
       setMessages((m) => [...m, { role: "assistant", content: "Network error sending message." }]);
     }
 
     setSending(false);
-  }
-
-  async function newChat() {
-    if (!characterId) {
-      alert("missing_characterId");
-      return;
-    }
-
-    const res = await fetch("/api/chat/new", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        characterId,
-        personaId, // optional
-      }),
-    });
-
-    const json = await res.json();
-    if (!res.ok) {
-      alert(json?.error ?? "failed");
-      return;
-    }
-
-    router.push(`/chat/${json.chatId}`);
-    router.refresh();
   }
 
   if (loading) {
@@ -196,7 +156,23 @@ export default function ChatPage() {
 
           <button
             className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
-            onClick={newChat}
+            onClick={async () => {
+              // Create a new chat for SAME character, keep old chats
+              const res = await fetch("/api/chat/new", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  chatId, // we pass current chatId, API will derive character_id
+                  keepPersona: true,
+                }),
+              });
+
+              const json = await res.json();
+              if (!res.ok) return alert(json?.error ?? "failed");
+
+              router.push(`/chat/${json.chatId}`);
+              router.refresh();
+            }}
           >
             New Chat
           </button>
@@ -244,6 +220,7 @@ export default function ChatPage() {
           }}
           disabled={sending}
         />
+
         <button
           className="px-6 py-3 rounded-2xl bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-60"
           onClick={send}

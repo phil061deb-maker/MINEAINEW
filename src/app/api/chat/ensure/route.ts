@@ -16,7 +16,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "missing_characterId" }, { status: 400 });
   }
 
-  // Load character so UI can show header (name + image)
+  // Load character
   const { data: character, error: charErr } = await supabase
     .from("characters")
     .select("id,name,image_path,description,personality,greeting,example_dialogue,nsfw,visibility")
@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "character_not_found" }, { status: 404 });
   }
 
-  // Find most recent chat for this user + this character
+  // Find existing chat
   const { data: existing } = await supabase
     .from("chats")
     .select("id")
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
 
   let chatId = existing?.[0]?.id ?? null;
 
-  // Create chat if missing
+  // Create if missing
   if (!chatId) {
     const { data: created, error: createErr } = await supabase
       .from("chats")
@@ -47,10 +47,7 @@ export async function POST(req: Request) {
       .single();
 
     if (createErr || !created) {
-      return NextResponse.json(
-        { error: "chat_create_failed", details: createErr?.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "chat_create_failed", details: createErr?.message }, { status: 500 });
     }
 
     chatId = created.id;

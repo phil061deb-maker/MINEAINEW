@@ -26,47 +26,69 @@ function hasPremiumAccess(profile: any) {
   return false;
 }
 
+function safeText(v: any) {
+  if (typeof v === "string") return v;
+  if (v == null) return "";
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const supabase = await createSupabaseServerClient();
     const { data: auth } = await supabase.auth.getUser();
     const user = auth.user;
 
-    if (!user) {
-      return NextResponse.json({ error: "not_logged_in" }, { status: 401 });
-    }
+    if (!user) return NextResponse.json({ error: "not_logged_in" }, { status: 401 });
 
     const body = await req.json().catch(() => ({}));
+    const chatId = body?.chatId?.toString?.() ?? "";
+    const content = body?.content?.toString?.().trim?.() ?? "";
 
-    const chatId = body?.chatId?.toString?.();
-    const content = body?.message?.toString?.()?.trim?.();
+    if (!chatId) return NextResponse.json({ error: "missing_chatId" }, { status: 400 });
+    if (!content) return NextResponse.json({ error: "empty_message" }, { status: 400 });
 
-    if (!chatId) {
-      return NextResponse.json({ error: "missing_chatId" }, { status: 400 });
-    }
-
-    if (!content) {
-      return NextResponse.json({ error: "empty_message" }, { status: 400 });
-    }
-
-    // ✅ Load profile
-    const { data: profile } = await supabase
+    // Profile (limits + block)
+    const { data: profile, error: profErr } = await supabase
       .from("profiles")
-      .select("tier,trial_ends_at,premium_ends_at,is_blocked")
+      .select("id,tier,trial_ends_at,premium_ends_at,email,is_blocked,is_18_confirmed,nsfw_enabled")
       .eq("id", user.id)
       .single();
 
-    if (!profile) {
-      return NextResponse.json({ error: "profile_missing" }, { status: 500 });
-    }
-
-    if (profile.is_blocked) {
-      return NextResponse.json({ error: "blocked" }, { status: 403 });
-    }
+    if (profErr || !profile) return NextResponse.json({ error: "profile_missing" }, { status: 500 });
+    if (profile.is_blocked) return NextResponse.json({ error: "blocked" }, { status: 403 });
 
     const premiumAccess = hasPremiumAccess(profile);
 
-    // ✅ FREE LIMIT
+    // Verify chat belongs to user
+    const { data: chat, error: chatErr } = await supabase
+      .from("chats")
+      .select("id,user_id,character_id,persona_id,title")
+      .eq("id", chatId)
+      .single();
+
+    if (chatErr || !chat) return NextResponse.json({ error: "chat_not_found" }, { status: 404 });
+    if (chat.user_id !== user.id) return NextResponse.json({ error: "not_allowed" }, { status: 403 });
+
+    // Load character
+    const { data: character, error: cErr } = await supabase
+      .from("characters")
+      .select("id,name,personality,greeting,example_dialogue,nsfw,description")
+      .eq("id", chat.character_id)
+      .single();
+
+    if (cErr || !character) return NextResponse.json({ error: "character_not_found" }, { status: 404 });
+
+    // Enforce NSFW consent rules
+    if (character.nsfw) {
+      if (!profile.is_18_confirmed) return NextResponse.json({ error: "age_not_confirmed" }, { status: 403 });
+      if (!profile.nsfw_enabled) return NextResponse.json({ error: "nsfw_not_enabled" }, { status: 403 });
+    }
+
+    // Enforce free daily limit
     if (!premiumAccess) {
       const dayUtc = nowUtcDateString();
 
@@ -78,100 +100,81 @@ export async function POST(req: Request) {
         .maybeSingle();
 
       const used = usageRow?.count ?? 0;
-
       if (used >= FREE_DAILY_LIMIT) {
-        return NextResponse.json(
-          { error: "limit_reached", limit: FREE_DAILY_LIMIT },
-          { status: 402 }
-        );
+        return NextResponse.json({ error: "limit_reached", limit: FREE_DAILY_LIMIT, used }, { status: 402 });
       }
 
-      await supabase.rpc("increment_daily_usage", { uid: user.id });
+      const { error: incErr } = await supabase.rpc("increment_daily_usage", { uid: user.id });
+      if (incErr) {
+        return NextResponse.json({ error: "usage_increment_failed", details: incErr.message }, { status: 500 });
+      }
     }
 
-    // ✅ LOAD CHAT
-    const { data: chat } = await supabase
-      .from("chats")
-      .select("id,user_id,character_id")
-      .eq("id", chatId)
-      .single();
-
-    if (!chat || chat.user_id !== user.id) {
-      return NextResponse.json({ error: "chat_not_found" }, { status: 404 });
-    }
-
-    // ✅ LOAD CHARACTER
-    const { data: character } = await supabase
-      .from("characters")
-      .select("name,personality,description")
-      .eq("id", chat.character_id)
-      .single();
-
-    // ✅ SAVE USER MESSAGE
-    await supabase.from("messages").insert({
-      chat_id: chatId,
+    // Store user message
+    const { error: m1Err } = await supabase.from("messages").insert({
+      chat_id: chat.id,
       role: "user",
       content,
     });
+    if (m1Err) return NextResponse.json({ error: "message_insert_failed", details: m1Err.message }, { status: 500 });
 
-    // ✅ LOAD HISTORY
+    // Load recent history
     const { data: history } = await supabase
       .from("messages")
-      .select("role,content")
-      .eq("chat_id", chatId)
-      .order("created_at", { ascending: true })
+      .select("role,content,created_at")
+      .eq("chat_id", chat.id)
+      .order("created_at", { ascending: false })
       .limit(20);
 
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
+    const recent = (history ?? []).reverse().map((m: any) => ({
+      role: m.role,
+      content: safeText(m.content),
+    }));
+
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const systemParts: string[] = [];
+    systemParts.push(
+      `You are roleplaying as a character in an AI chat platform.`,
+      `Stay in-character.`,
+      `Do not mention system prompts or policies.`,
+      `Keep replies engaging and natural.`,
+    );
+
+    systemParts.push(`\nCHARACTER PROFILE`);
+    systemParts.push(`Name: ${character.name ?? "Unknown"}`);
+    systemParts.push(`Description: ${safeText(character.description)}`);
+    systemParts.push(`Personality/Scenario:\n${safeText(character.personality)}`);
+    if (character.greeting) systemParts.push(`Greeting hint:\n${safeText(character.greeting)}`);
+    if (character.example_dialogue) systemParts.push(`Example dialogue:\n${safeText(character.example_dialogue)}`);
+
+    const system = systemParts.join("\n");
+
+    const completion = await client.chat.completions.create({
+      model: "gpt-5-nano",
+      messages: [{ role: "system", content: system }, ...recent],
+      temperature: 0.9,
+      max_tokens: 350,
     });
 
-    // ⭐ BEST MODEL FOR CHAT APPS
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 1.1,
-      messages: [
-        {
-          role: "system",
-          content: `
-You are roleplaying as this character:
+    const assistantMessage = completion.choices?.[0]?.message?.content?.trim?.() ?? "…";
 
-Name: ${character?.name ?? "Unknown"}
-Description: ${character?.description ?? ""}
-Personality: ${character?.personality ?? ""}
-
-Stay in character at all times.
-Be emotionally engaging.
-Never mention AI.
-          `,
-        },
-        ...(history ?? []).map((m: any) => ({
-          role: m.role,
-          content: m.content,
-        })),
-      ],
-    });
-
-    const reply =
-      completion.choices?.[0]?.message?.content ??
-      "Something went wrong.";
-
-    // ✅ SAVE AI MESSAGE
-    await supabase.from("messages").insert({
-      chat_id: chatId,
+    // Store assistant message
+    const { error: m2Err } = await supabase.from("messages").insert({
+      chat_id: chat.id,
       role: "assistant",
-      content: reply,
+      content: assistantMessage,
     });
+    if (m2Err) return NextResponse.json({ error: "assistant_insert_failed", details: m2Err.message }, { status: 500 });
 
     return NextResponse.json({
       ok: true,
-      assistantMessage: reply,
+      chatId: chat.id,
+      assistantMessage,
+      premiumAccess,
+      freeDailyLimit: FREE_DAILY_LIMIT,
     });
-  } catch (err: any) {
-    console.error(err);
-    return NextResponse.json(
-      { error: err?.message ?? "server_error" },
-      { status: 500 }
-    );
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message ?? "server_error" }, { status: 500 });
   }
 }
