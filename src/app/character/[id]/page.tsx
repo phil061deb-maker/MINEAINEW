@@ -1,23 +1,16 @@
 import Link from "next/link";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import ChatStartButton from "@/components/chat/ChatStartButton";
 
 function publicImageUrl(path: string | null) {
   if (!path) return null;
-
   const base = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  // IMPORTANT: this assumes your bucket name is EXACTLY: character-images
-  // and your DB column is EXACTLY: image_path
   return `${base}/storage/v1/object/public/character-images/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
 }
 
-export default async function CharacterDetailPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = await params;
-
+export default async function CharacterDetailPage({ params }: { params: { id: string } }) {
   const supabase = await createSupabaseServerClient();
+  const id = params.id;
 
   const { data: c, error } = await supabase
     .from("characters")
@@ -61,18 +54,15 @@ export default async function CharacterDetailPage({
 
             <h1 className="text-3xl font-semibold mt-2">{c.name}</h1>
 
-            <p className="text-zinc-300 mt-3 whitespace-pre-wrap">
-              {c.description || "—"}
-            </p>
+            <p className="text-zinc-300 mt-3 whitespace-pre-wrap">{c.description || "—"}</p>
 
             <div className="mt-6 flex gap-2 flex-wrap">
               <Link className="btn-ghost" href="/characters">
                 Back
               </Link>
 
-              <Link className="btn-primary" href={`/chat/${c.id}`}>
-                Chat
-              </Link>
+              {/* ✅ FIXED: start chat properly (ensure -> chatId) */}
+              <ChatStartButton characterId={c.id} className="btn-primary" />
             </div>
           </div>
         </div>
@@ -81,23 +71,17 @@ export default async function CharacterDetailPage({
       <div className="grid gap-5 md:grid-cols-2">
         <div className="card p-6 space-y-2">
           <div className="text-sm font-semibold">Personality / Scenario</div>
-          <div className="text-sm text-zinc-300 whitespace-pre-wrap">
-            {c.personality || "—"}
-          </div>
+          <div className="text-sm text-zinc-300 whitespace-pre-wrap">{c.personality || "—"}</div>
         </div>
 
         <div className="card p-6 space-y-2">
           <div className="text-sm font-semibold">Greeting</div>
-          <div className="text-sm text-zinc-300 whitespace-pre-wrap">
-            {c.greeting || "—"}
-          </div>
+          <div className="text-sm text-zinc-300 whitespace-pre-wrap">{c.greeting || "—"}</div>
         </div>
 
         <div className="card p-6 space-y-2 md:col-span-2">
           <div className="text-sm font-semibold">Example Dialogue</div>
-          <div className="text-sm text-zinc-300 whitespace-pre-wrap">
-            {c.example_dialogue || "—"}
-          </div>
+          <div className="text-sm text-zinc-300 whitespace-pre-wrap">{c.example_dialogue || "—"}</div>
         </div>
       </div>
     </div>

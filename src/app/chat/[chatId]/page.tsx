@@ -10,38 +10,24 @@ function publicImageUrl(path: string | null) {
   return `${base}/storage/v1/object/public/character-images/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
 }
 
-type ChatRow = {
-  id: string;
-  user_id: string;
-  character_id: string;
-  persona_id: string | null;
-  title: string | null;
-};
-
-type HeaderState = {
-  name: string;
-  image: string | null;
-  characterId: string;
-  personaId: string | null;
-};
-
 export default function ChatPage() {
   const params = useParams<{ chatId: string }>();
   const chatId = params?.chatId;
-
   const router = useRouter();
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
 
   const [loading, setLoading] = useState(true);
-
-  const [chatMeta, setChatMeta] = useState<ChatRow | null>(null);
-  const [header, setHeader] = useState<HeaderState | null>(null);
+  const [header, setHeader] = useState<{ name: string; image: string | null } | null>(null);
 
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+
+  // ✅ we need these so New Chat can work
+  const [characterId, setCharacterId] = useState<string | null>(null);
+  const [personaId, setPersonaId] = useState<string | null>(null);
 
   async function loadChat() {
     setLoading(true);
@@ -54,16 +40,14 @@ export default function ChatPage() {
       return;
     }
 
-    // 1) Load chat row
     const { data: chat, error: chatErr } = await supabase
       .from("chats")
-      .select("id,user_id,character_id,persona_id,title")
+      .select("id, user_id, character_id, persona_id, title")
       .eq("id", chatId)
       .single();
 
     if (chatErr || !chat) {
       setHistoryError("chat_not_found");
-      setChatMeta(null);
       setHeader(null);
       setMessages([]);
       setLoading(false);
@@ -72,16 +56,15 @@ export default function ChatPage() {
 
     if (chat.user_id !== auth.user.id) {
       setHistoryError("not_allowed");
-      setChatMeta(null);
       setHeader(null);
       setMessages([]);
       setLoading(false);
       return;
     }
 
-    setChatMeta(chat as ChatRow);
+    setCharacterId(chat.character_id);
+    setPersonaId(chat.persona_id ?? null);
 
-    // 2) Load character for header (name + image)
     const { data: character } = await supabase
       .from("characters")
       .select("name,image_path")
@@ -91,15 +74,11 @@ export default function ChatPage() {
     setHeader({
       name: character?.name ?? chat.title ?? "Chat",
       image: publicImageUrl(character?.image_path ?? null),
-      characterId: chat.character_id,
-      personaId: chat.persona_id ?? null,
     });
 
-    // 3) Load history via API
     try {
-      const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(chatId!)}`, { cache: "no-store" });
+      const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(chatId)}`, { cache: "no-store" });
       const json = await res.json();
-
       if (!res.ok) {
         setHistoryError(json?.error ?? "history_failed");
         setMessages([]);
@@ -127,14 +106,14 @@ export default function ChatPage() {
     setSending(true);
     setInput("");
 
-    // Optimistic UI
     setMessages((m) => [...m, { role: "user", content: text }]);
 
     try {
       const res = await fetch("/api/chat/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId, message: text }),
+        // ✅ your API supports message/content — we send content
+        body: JSON.stringify({ chatId, content: text }),
       });
 
       const json = await res.json();
@@ -147,7 +126,7 @@ export default function ChatPage() {
         } else if (json?.reply) {
           setMessages((m) => [...m, { role: "assistant", content: json.reply }]);
         } else {
-          setMessages((m) => [...m, { role: "assistant", content: "✅ Message saved." }]);
+          setMessages((m) => [...m, { role: "assistant", content: "…(no reply returned)" }]);
         }
       }
     } catch {
@@ -158,8 +137,7 @@ export default function ChatPage() {
   }
 
   async function newChat() {
-    // We MUST have characterId to create a new chat
-    if (!header?.characterId) {
+    if (!characterId) {
       alert("missing_characterId");
       return;
     }
@@ -168,8 +146,8 @@ export default function ChatPage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        characterId: header.characterId,
-        personaId: header.personaId, // keeps persona if there is one
+        characterId,
+        personaId, // optional
       }),
     });
 
@@ -179,7 +157,6 @@ export default function ChatPage() {
       return;
     }
 
-    // ✅ Go to the NEW chat
     router.push(`/chat/${json.chatId}`);
     router.refresh();
   }
@@ -194,7 +171,6 @@ export default function ChatPage() {
 
   return (
     <div className="space-y-4">
-      {/* HEADER BAR */}
       <div className="rounded-[28px] border border-white/10 bg-black/30 backdrop-blur-xl p-5 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
           <div className="h-11 w-11 rounded-2xl border border-white/10 bg-white/5 overflow-hidden grid place-items-center">
@@ -209,9 +185,7 @@ export default function ChatPage() {
           <div className="min-w-0">
             <div className="text-xs text-zinc-400">Chatting with</div>
             <div className="font-semibold truncate">{header?.name ?? "Chat"}</div>
-            {historyError && (
-              <div className="text-xs text-amber-300 mt-1">History error: {historyError}</div>
-            )}
+            {historyError && <div className="text-xs text-amber-300 mt-1">History error: {historyError}</div>}
           </div>
         </div>
 
@@ -236,7 +210,6 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* CHAT BODY */}
       <div className="rounded-[28px] border border-white/10 bg-black/30 backdrop-blur-xl p-5 min-h-[420px]">
         <div className="space-y-4">
           {messages.map((m, idx) => (
@@ -253,13 +226,10 @@ export default function ChatPage() {
             </div>
           ))}
 
-          {!messages.length && (
-            <div className="text-zinc-400 text-sm">Say hi 👋</div>
-          )}
+          {!messages.length && <div className="text-zinc-400 text-sm">Say hi 👋</div>}
         </div>
       </div>
 
-      {/* INPUT */}
       <div className="rounded-[28px] border border-white/10 bg-black/30 backdrop-blur-xl p-4 flex items-center gap-3">
         <input
           className="w-full bg-transparent outline-none text-zinc-100 placeholder:text-zinc-500 px-3 py-2 rounded-2xl border border-white/10 bg-white/5"
@@ -274,7 +244,6 @@ export default function ChatPage() {
           }}
           disabled={sending}
         />
-
         <button
           className="px-6 py-3 rounded-2xl bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-60"
           onClick={send}

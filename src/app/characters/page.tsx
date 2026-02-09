@@ -1,16 +1,11 @@
 import Link from "next/link";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import ChatStartButton from "@/components/chat/ChatStartButton";
 
-function publicImageUrl(value: string | null) {
-  if (!value) return null;
-
-  // If DB already stores a full URL, use it directly
-  if (value.startsWith("http://") || value.startsWith("https://")) return value;
-
-  // Otherwise treat it as a storage path inside the bucket
+function publicImageUrl(path: string | null) {
+  if (!path) return null;
   const base = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const cleaned = value.replace(/^\/+/, ""); // remove leading slashes
-  return `${base}/storage/v1/object/public/character-images/${cleaned}`;
+  return `${base}/storage/v1/object/public/character-images/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
 }
 
 export default async function PublicCharactersPage() {
@@ -43,13 +38,6 @@ export default async function PublicCharactersPage() {
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
         {(data ?? []).map((c) => {
           const img = publicImageUrl(c.image_path);
-
-          // Avoid hydration mismatch: show a stable date string (YYYY-MM-DD)
-          const dateStr =
-            typeof c.created_at === "string" && c.created_at.length >= 10
-              ? c.created_at.slice(0, 10)
-              : "";
-
           return (
             <div key={c.id} className="card p-5">
               <div className="flex items-start justify-between gap-3">
@@ -57,12 +45,11 @@ export default async function PublicCharactersPage() {
                   {c.visibility}
                   {c.nsfw ? " • NSFW" : ""}
                 </div>
-                <div className="text-xs text-zinc-500">{dateStr}</div>
+                <div className="text-xs text-zinc-500">{String(c.created_at).slice(0, 10)}</div>
               </div>
 
               <div className="mt-3 h-[180px] w-full rounded-2xl border border-white/10 bg-white/5 overflow-hidden grid place-items-center">
                 {img ? (
-                  // Keep this a plain <img> (NO onError handlers in Server Components)
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={img} alt={c.name} className="h-full w-full object-cover" />
                 ) : (
@@ -77,9 +64,9 @@ export default async function PublicCharactersPage() {
                 <Link className="btn-ghost flex-1 text-center" href={`/character/${c.id}`}>
                   View
                 </Link>
-                <Link className="btn-primary flex-1 text-center" href={`/chat/${c.id}`}>
-                  Chat
-                </Link>
+
+                {/* ✅ THIS FIXES YOUR CHAT. It creates/gets a chatId first. */}
+                <ChatStartButton characterId={c.id} />
               </div>
             </div>
           );
