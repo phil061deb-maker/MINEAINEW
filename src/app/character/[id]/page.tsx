@@ -56,7 +56,6 @@ export default async function CharacterDetailPage({ params }: { params: { id: st
                 Back
               </Link>
 
-              {/* Start chat properly (ensure -> chatId -> /chat/[chatId]) */}
               <ChatStartButton characterId={c.id} className="btn-primary" />
             </div>
           </div>
