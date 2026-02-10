@@ -141,7 +141,7 @@ export default function ChatPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chatId, message: text }),
         },
-        25000 // 25 seconds
+        25000
       );
 
       const json = await res.json().catch(() => ({}));
@@ -203,6 +203,30 @@ export default function ChatPage() {
           <span className="px-3 py-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 text-emerald-200 text-xs">
             ● Live
           </span>
+
+          {/* ✅ NEW CHAT button back */}
+          <button
+            className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
+            onClick={async () => {
+              const res = await fetch("/api/chat/new", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  chatId,
+                  keepPersona: true,
+                }),
+              });
+
+              const json = await res.json();
+              if (!res.ok) return alert(json?.error ?? "failed");
+
+              router.push(`/chat/${json.chatId}`);
+              router.refresh();
+            }}
+          >
+            New Chat
+          </button>
+
           <button
             className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
             onClick={() => router.back()}

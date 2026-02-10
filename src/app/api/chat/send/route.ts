@@ -173,18 +173,19 @@ export async function POST(req: Request) {
     const model = "gpt-5-nano";
 
     const completion = await withTimeout(
-      client.chat.completions.create({
-        model,
-        messages: [
-          { role: "system", content: system },
-          ...recent.map((m: any) => ({ role: m.role, content: m.content })),
-        ],
-        temperature: 0.9,
-        // ✅ IMPORTANT for GPT-5 models:
-        max_completion_tokens: 350,
-      }),
-      20000 // 20 seconds timeout
-    );
+  client.chat.completions.create({
+    model: "gpt-5-nano",
+    messages: [
+      { role: "system", content: system },
+      ...recent.map((m: any) => ({ role: m.role, content: m.content })),
+    ],
+    // ✅ GPT-5 nano: do NOT set temperature (it only supports default/1)
+    // temperature: 0.9,
+    max_completion_tokens: 350,
+  }),
+  20000
+);
+
 
     const assistantMessage = completion.choices?.[0]?.message?.content?.trim?.() ?? "";
 
