@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { getUser } from "@/lib/auth/getUser";
+import ChatStartButton from "@/components/chat/ChatStartButton";
 
 function publicImageUrl(path: string | null) {
   if (!path) return null;
@@ -9,54 +9,48 @@ function publicImageUrl(path: string | null) {
 }
 
 export default async function MyCharactersPage() {
-  const user = await getUser();
+  const supabase = await createSupabaseServerClient();
+  const { data: auth } = await supabase.auth.getUser();
 
-  if (!user) {
+  if (!auth.user) {
     return (
-      <div className="card p-6">
-        <h1 className="text-2xl font-semibold">My Characters</h1>
-        <p className="text-zinc-400 mt-2">Sign in to view your characters.</p>
-        <div className="mt-6 flex gap-2">
-          <Link className="btn-primary" href="/auth/signin">Sign in</Link>
-          <Link className="btn-ghost" href="/auth/signup">Sign up</Link>
+      <div className="card p-8 text-zinc-300">
+        Please sign in.
+        <div className="mt-4">
+          <Link className="btn-primary" href="/auth/signin">
+            Sign in
+          </Link>
         </div>
       </div>
     );
   }
 
-  const supabase = await createSupabaseServerClient();
-  const { data, error } = await supabase
+  const { data: characters } = await supabase
     .from("characters")
-    .select("id,name,description,visibility,nsfw,created_at,image_path")
-    .eq("creator", user.id)
+    .select("id,name,description,image_path,created_at")
+    .eq("user_id", auth.user.id)
     .order("created_at", { ascending: false });
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4">
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
-          <h1 className="text-3xl font-semibold">My Characters</h1>
-          <p className="text-sm text-zinc-400 mt-1">Loaded from Supabase.</p>
+          <h1 className="text-2xl font-semibold">My Characters</h1>
+          <div className="text-sm text-zinc-400">Characters you created.</div>
         </div>
-        <Link className="btn-primary" href="/create">+ Create</Link>
+
+        <Link className="btn-primary" href="/create">
+          + Create
+        </Link>
       </div>
 
-      {error && (
-        <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-          Error loading your characters: {error.message}
-        </div>
-      )}
+      <div className="grid gap-5 md:grid-cols-3">
+        {(characters ?? []).map((c) => {
+          const img = publicImageUrl(c.image_path ?? null);
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
-        {(data ?? []).map((c) => {
-          const img = publicImageUrl(c.image_path);
           return (
             <div key={c.id} className="card p-5">
-              <div className="text-xs text-zinc-400">
-                {c.visibility}{c.nsfw ? " • NSFW" : ""}
-              </div>
-
-              <div className="mt-3 h-[180px] w-full rounded-2xl border border-white/10 bg-white/5 overflow-hidden grid place-items-center">
+              <div className="h-[190px] rounded-3xl overflow-hidden border border-white/10 bg-white/5 grid place-items-center">
                 {img ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={img} alt={c.name} className="h-full w-full object-cover" />
@@ -65,29 +59,22 @@ export default async function MyCharactersPage() {
                 )}
               </div>
 
-              <h2 className="text-lg font-semibold mt-4">{c.name}</h2>
-              <p className="text-sm text-zinc-400 mt-2 line-clamp-2">
-                {c.description || "—"}
-              </p>
+              <div className="mt-4 font-semibold">{c.name}</div>
+              <div className="text-sm text-zinc-400 mt-1 line-clamp-2">{c.description || "—"}</div>
 
-              <div className="mt-5 flex gap-2">
-                <Link className="btn-ghost flex-1 text-center" href={`/character/${c.id}`}>
+              <div className="mt-4 flex gap-2">
+                {/* ✅ FIX: View must go to /characters/<id> */}
+                <Link className="btn-ghost" href={`/characters/${c.id}`}>
                   View
                 </Link>
-                <Link className="btn-primary flex-1 text-center" href={`/chat/${c.id}`}>
-                  Chat
-                </Link>
+
+                {/* ✅ FIX: Chat must use ChatStartButton */}
+                <ChatStartButton characterId={c.id} className="btn-primary" />
               </div>
             </div>
           );
         })}
       </div>
-
-      {(data ?? []).length === 0 && !error && (
-        <div className="card p-8 text-center text-zinc-400">
-          You haven’t created any characters yet.
-        </div>
-      )}
     </div>
   );
 }

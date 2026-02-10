@@ -19,6 +19,8 @@ export default function ChatPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
 
   const [loading, setLoading] = useState(true);
+
+  const [characterId, setCharacterId] = useState<string>("");
   const [header, setHeader] = useState<{ name: string; image: string | null } | null>(null);
 
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -41,7 +43,7 @@ export default function ChatPage() {
       return;
     }
 
-    // Load personas for dropdown
+    // Personas for dropdown
     try {
       const pRes = await fetch("/api/personas/list", { cache: "no-store" });
       const pJson = await pRes.json();
@@ -50,10 +52,10 @@ export default function ChatPage() {
       setPersonas([]);
     }
 
-    // Fetch chat + character
+    // Chat row (this gives us character_id + persona_id)
     const { data: chat, error: chatErr } = await supabase
       .from("chats")
-      .select("id, user_id, character_id, persona_id, title")
+      .select("id,user_id,character_id,persona_id,title")
       .eq("id", chatId)
       .single();
 
@@ -73,8 +75,10 @@ export default function ChatPage() {
       return;
     }
 
+    setCharacterId(chat.character_id);
     setSelectedPersonaId(chat.persona_id ?? "");
 
+    // Character header
     const { data: character } = await supabase
       .from("characters")
       .select("name,image_path")
@@ -86,7 +90,7 @@ export default function ChatPage() {
       image: publicImageUrl(character?.image_path ?? null),
     });
 
-    // Load history
+    // History
     try {
       const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(chatId)}`, { cache: "no-store" });
       const json = await res.json();
@@ -112,13 +116,38 @@ export default function ChatPage() {
 
   async function setPersona(personaId: string) {
     setSelectedPersonaId(personaId);
+
     const res = await fetch("/api/chat/set-persona", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chatId, personaId: personaId || null }),
     });
+
     const json = await res.json();
     if (!res.ok) alert(json?.error ?? "persona_set_failed");
+  }
+
+  // ✅ NEW CHAT = create brand new chat, keep old chat
+  async function newChat() {
+    if (!characterId) return alert("missing_characterId");
+
+    const res = await fetch("/api/chat/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        characterId,
+        personaId: selectedPersonaId || null,
+      }),
+    });
+
+    const json = await res.json();
+    if (!res.ok) return alert(json?.error ?? "new_chat_failed");
+
+    const newChatId = json?.chatId;
+    if (!newChatId) return alert("new_chat_failed: no chatId");
+
+    router.push(`/chat/${newChatId}`);
+    router.refresh();
   }
 
   async function send() {
@@ -128,7 +157,7 @@ export default function ChatPage() {
     setSending(true);
     setInput("");
 
-    // Optimistic UI
+    // show user message immediately
     setMessages((m) => [...m, { role: "user", content: text }]);
 
     try {
@@ -137,18 +166,14 @@ export default function ChatPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chatId, message: text }),
       });
+
       const json = await res.json();
 
       if (!res.ok) {
         setMessages((m) => [...m, { role: "assistant", content: `Error: ${json?.error ?? "send_failed"}` }]);
       } else {
-        if (json?.assistantMessage) {
-          setMessages((m) => [...m, { role: "assistant", content: json.assistantMessage }]);
-        } else if (json?.reply) {
-          setMessages((m) => [...m, { role: "assistant", content: json.reply }]);
-        } else {
-          setMessages((m) => [...m, { role: "assistant", content: "Error: empty_reply" }]);
-        }
+        const reply = json?.assistantMessage ?? json?.reply ?? "";
+        setMessages((m) => [...m, { role: "assistant", content: reply || "Error: empty_reply" }]);
       }
     } catch {
       setMessages((m) => [...m, { role: "assistant", content: "Network error sending message." }]);
@@ -190,7 +215,7 @@ export default function ChatPage() {
             ● Live
           </span>
 
-          {/* ✅ Persona dropdown */}
+          {/* ✅ Keep persona dropdown */}
           <select
             className="px-3 py-2 rounded-2xl border border-white/10 bg-white/5 text-zinc-200"
             value={selectedPersonaId}
@@ -203,6 +228,14 @@ export default function ChatPage() {
               </option>
             ))}
           </select>
+
+          {/* ✅ Bring back New Chat */}
+          <button
+            className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
+            onClick={newChat}
+          >
+            New Chat
+          </button>
 
           <button
             className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
