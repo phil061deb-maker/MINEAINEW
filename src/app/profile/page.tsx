@@ -1,209 +1,260 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { NsfwGateModal } from "@/components/nsfw/NsfwGateModal";
+import { useEffect, useMemo, useState } from "react";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
-type Me = {
-  loggedIn: boolean;
-  email?: string | null;
-  displayName?: string | null;
-  tier?: string;
-  trial_ends_at?: string | null;
-  premium_ends_at?: string | null;
-  is_blocked?: boolean;
-  is_18_confirmed?: boolean;
-  nsfw_enabled?: boolean;
-};
+type Persona = { id: string; name: string; description: string | null; created_at: string };
 
-function fmt(date?: string | null) {
-  if (!date) return "—";
-  try {
-    return new Date(date).toLocaleString();
-  } catch {
-    return date;
-  }
+function hasPremiumAccess(profile: any) {
+  const tier = profile?.tier ?? "free";
+  if (tier === "admin" || tier === "premium") return true;
+
+  const trialEnds = profile?.trial_ends_at ? new Date(profile.trial_ends_at) : null;
+  const premiumEnds = profile?.premium_ends_at ? new Date(profile.premium_ends_at) : null;
+
+  const now = new Date();
+  if (trialEnds && trialEnds > now) return true;
+  if (premiumEnds && premiumEnds > now) return true;
+
+  return false;
 }
 
 export default function ProfilePage() {
-  const [me, setMe] = useState<Me | null>(null);
+  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const [is18, setIs18] = useState(false);
-  const [nsfw, setNsfw] = useState(false);
+  const [profile, setProfile] = useState<any>(null);
 
-  const [modalOpen, setModalOpen] = useState(false);
+  const [displayName, setDisplayName] = useState("");
+  const [bio, setBio] = useState("");
+  const [over18, setOver18] = useState(false);
+  const [allowNsfw, setAllowNsfw] = useState(false);
 
-  async function loadMe() {
+  const [personas, setPersonas] = useState<Persona[]>([]);
+  const [pName, setPName] = useState("");
+  const [pDesc, setPDesc] = useState("");
+  const [creatingPersona, setCreatingPersona] = useState(false);
+
+  const premiumAccess = hasPremiumAccess(profile);
+
+  async function loadAll() {
     setLoading(true);
 
-    const res = await fetch("/api/me", { cache: "no-store" });
-    const json = await res.json();
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) {
+      window.location.href = "/auth/signin";
+      return;
+    }
 
-    setMe(json);
-    setIs18(!!json.is_18_confirmed);
-    setNsfw(!!json.nsfw_enabled);
+    const { data: p } = await supabase
+      .from("profiles")
+      .select("id,email,tier,trial_ends_at,premium_ends_at,display_name,bio,over18,allow_nsfw")
+      .eq("id", auth.user.id)
+      .single();
+
+    setProfile(p ?? null);
+    setDisplayName(p?.display_name ?? "");
+    setBio(p?.bio ?? "");
+    setOver18(Boolean(p?.over18));
+    setAllowNsfw(Boolean(p?.allow_nsfw));
+
+    // personas
+    const res = await fetch("/api/personas/list", { cache: "no-store" });
+    const json = await res.json();
+    if (res.ok) setPersonas(Array.isArray(json.personas) ? json.personas : []);
+    else setPersonas([]);
 
     setLoading(false);
   }
 
-  async function saveSettings() {
-    setSaving(true);
+  useEffect(() => {
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    const res = await fetch("/api/profile/settings", {
+  async function saveProfile() {
+    setSaving(true);
+    const res = await fetch("/api/profile/update", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        is_18_confirmed: is18,
-        nsfw_enabled: nsfw,
+        display_name: displayName,
+        bio,
+        over18,
+        allow_nsfw: allowNsfw,
       }),
     });
-
     const json = await res.json();
     setSaving(false);
 
-    if (!res.ok) {
-      alert(json?.error ?? "Failed to save settings");
-      return;
-    }
+    if (!res.ok) return alert(json?.error ?? "save_failed");
 
-    await loadMe();
-    alert("Settings saved ✅");
+    // refresh local state from response
+    setOver18(Boolean(json.over18));
+    setAllowNsfw(Boolean(json.allow_nsfw));
+
+    alert("✅ Saved!");
+    await loadAll();
   }
 
-  useEffect(() => {
-    loadMe();
-  }, []);
+  async function createPersona() {
+    const name = pName.trim();
+    if (!name) return alert("Persona name required.");
+
+    setCreatingPersona(true);
+    const res = await fetch("/api/personas/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, description: pDesc }),
+    });
+    const json = await res.json();
+    setCreatingPersona(false);
+
+    if (!res.ok) return alert(json?.error ?? "persona_create_failed");
+
+    setPName("");
+    setPDesc("");
+    await loadAll();
+  }
 
   if (loading) {
-    return <div className="text-zinc-400">Loading profile…</div>;
-  }
-
-  if (!me?.loggedIn) {
-    return <div className="text-zinc-400">Please sign in.</div>;
+    return (
+      <div className="card p-10">
+        <div className="text-zinc-300">Loading profile...</div>
+      </div>
+    );
   }
 
   return (
-    <div className="space-y-6 max-w-3xl">
-      {/* NSFW MODAL */}
-      <NsfwGateModal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        initial18={!!me.is_18_confirmed}
-        initialNsfw={!!me.nsfw_enabled}
-        onSaved={(next18, nextNsfw) => {
-          // Keep UI in sync after saving in modal
-          setIs18(next18);
-          setNsfw(nextNsfw);
-          setMe((prev) =>
-            prev ? { ...prev, is_18_confirmed: next18, nsfw_enabled: nextNsfw } : prev
-          );
-        }}
-      />
-
-      {/* HEADER */}
+    <div className="space-y-6">
       <div className="card p-6">
-        <h1 className="text-3xl font-semibold">Your Profile</h1>
-        <p className="text-sm text-zinc-400 mt-1">
-          Manage your account, subscription, and content preferences.
-        </p>
-      </div>
-
-      {/* ACCOUNT INFO */}
-      <div className="card p-6 space-y-3">
-        <h2 className="text-lg font-semibold">Account</h2>
-
-        <div>
-          <div className="text-xs text-zinc-500">Email</div>
-          <div className="font-medium">{me.email ?? "—"}</div>
-        </div>
-
-        <div>
-          <div className="text-xs text-zinc-500">Tier</div>
-          <div className="font-medium capitalize">{me.tier ?? "free"}</div>
-        </div>
-
-        <div>
-          <div className="text-xs text-zinc-500">Trial ends</div>
-          <div>{fmt(me.trial_ends_at)}</div>
-        </div>
-
-        <div>
-          <div className="text-xs text-zinc-500">Premium ends</div>
-          <div>{fmt(me.premium_ends_at)}</div>
-        </div>
-
-        {me.is_blocked && (
-          <div className="rounded-xl bg-red-500/10 border border-red-500/20 px-4 py-3 text-red-200">
-            Your account is currently blocked. Please contact support.
-          </div>
-        )}
-      </div>
-
-      {/* NSFW SETTINGS */}
-      <div className="card p-6 space-y-5">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
-            <h2 className="text-lg font-semibold">NSFW Access</h2>
-            <p className="text-sm text-zinc-400 mt-1">
-              You must confirm 18+ and save before NSFW chats are allowed.
-            </p>
+            <div className="text-xs text-zinc-400">Your account</div>
+            <div className="text-xl font-semibold">{profile?.email ?? "—"}</div>
+            <div className="text-sm text-zinc-400 mt-1">
+              Tier: <span className="text-zinc-200">{profile?.tier ?? "free"}</span>
+              {premiumAccess ? " • Premium Active" : ""}
+            </div>
           </div>
 
           <button
-            onClick={() => setModalOpen(true)}
-            className="px-4 py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
+            className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
+            onClick={async () => {
+              await supabase.auth.signOut();
+              window.location.href = "/";
+            }}
           >
-            Open Popup
+            Sign out
+          </button>
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-5">
+        <div className="card p-6 space-y-4">
+          <div className="text-lg font-semibold">Profile info</div>
+
+          <div>
+            <div className="label mb-1">Display name</div>
+            <input
+              className="input"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="e.g. Philip"
+            />
+          </div>
+
+          <div>
+            <div className="label mb-1">Bio</div>
+            <textarea
+              className="input min-h-[120px]"
+              value={bio}
+              onChange={(e) => setBio(e.target.value)}
+              placeholder="Tell people who you are..."
+            />
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+            <label className="flex items-center gap-3 text-sm text-zinc-200">
+              <input type="checkbox" checked={over18} onChange={(e) => setOver18(e.target.checked)} />
+              I confirm I am 18+
+            </label>
+
+            <label className="flex items-center gap-3 text-sm text-zinc-200">
+              <input
+                type="checkbox"
+                checked={allowNsfw}
+                onChange={(e) => setAllowNsfw(e.target.checked)}
+                disabled={!premiumAccess || !over18}
+              />
+              Allow NSFW content (Premium only)
+            </label>
+
+            {!premiumAccess && (
+              <div className="text-xs text-amber-300">
+                🔒 NSFW is only available for Premium/Admin users.
+              </div>
+            )}
+            {premiumAccess && !over18 && (
+              <div className="text-xs text-amber-300">
+                ⚠️ Turn on “I am 18+” to enable NSFW.
+              </div>
+            )}
+          </div>
+
+          <button
+            onClick={saveProfile}
+            disabled={saving}
+            className="btn-primary w-full py-3 rounded-2xl text-base font-semibold disabled:opacity-60"
+          >
+            {saving ? "Saving..." : "Save profile"}
           </button>
         </div>
 
-        {/* 18+ */}
-        <label className="flex items-start gap-3">
-          <input
-            type="checkbox"
-            className="mt-1"
-            checked={is18}
-            onChange={(e) => {
-              const value = e.target.checked;
-              setIs18(value);
-              if (!value) setNsfw(false);
-            }}
-          />
+        <div className="card p-6 space-y-4">
+          <div className="text-lg font-semibold">Personas</div>
+          <div className="text-sm text-zinc-400">
+            Personas are like “who you are” when chatting. You can pick one per chat.
+          </div>
 
-          <div>
-            <div className="font-medium">I confirm that I am 18 years or older</div>
-            <div className="text-sm text-zinc-400">
-              Required before enabling NSFW chats.
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+            <div className="text-sm font-semibold">Create a persona</div>
+
+            <div>
+              <div className="label mb-1">Persona name</div>
+              <input className="input" value={pName} onChange={(e) => setPName(e.target.value)} placeholder="e.g. Liam" />
             </div>
+
+            <div>
+              <div className="label mb-1">Persona description</div>
+              <textarea
+                className="input min-h-[90px]"
+                value={pDesc}
+                onChange={(e) => setPDesc(e.target.value)}
+                placeholder="Age, vibe, style, backstory..."
+              />
+            </div>
+
+            <button
+              onClick={createPersona}
+              disabled={creatingPersona}
+              className="px-4 py-2 rounded-2xl bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-60"
+            >
+              {creatingPersona ? "Creating..." : "Create persona"}
+            </button>
           </div>
-        </label>
 
-        {/* NSFW toggle */}
-        <label className={`flex items-start gap-3 ${!is18 ? "opacity-40 pointer-events-none" : ""}`}>
-          <input
-            type="checkbox"
-            className="mt-1"
-            checked={nsfw}
-            disabled={!is18}
-            onChange={(e) => setNsfw(e.target.checked)}
-          />
-
-          <div>
-            <div className="font-medium">Enable NSFW characters & chats</div>
-            <div className="text-sm text-zinc-400">You MUST save after changing this.</div>
+          <div className="space-y-3">
+            {personas.map((p) => (
+              <div key={p.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <div className="font-semibold">{p.name}</div>
+                <div className="text-sm text-zinc-300 whitespace-pre-wrap mt-1">{p.description || "—"}</div>
+              </div>
+            ))}
+            {!personas.length && <div className="text-sm text-zinc-400">No personas yet.</div>}
           </div>
-        </label>
-
-        <button onClick={saveSettings} disabled={saving} className="btn-primary">
-          {saving ? "Saving..." : "Save Settings"}
-        </button>
-
-        <div className="text-xs text-zinc-500">
-          Current: 18+ = {me.is_18_confirmed ? "Yes" : "No"} • NSFW ={" "}
-          {me.nsfw_enabled ? "Enabled" : "Disabled"}
         </div>
       </div>
     </div>
