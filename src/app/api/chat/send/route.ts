@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
+export const runtime = "nodejs"; // IMPORTANT: don't run this on edge
+export const dynamic = "force-dynamic";
+
 const FREE_DAILY_LIMIT = 30;
 
 function nowUtcDateString() {
@@ -36,36 +39,8 @@ function safeText(v: any) {
   }
 }
 
-// Extract text from different response shapes
-function extractAssistantText(resp: any): string {
-  const ot = (resp?.output_text ?? "").trim();
-  if (ot) return ot;
-
-  const output = resp?.output;
-  if (Array.isArray(output)) {
-    const parts: string[] = [];
-    for (const item of output) {
-      const content = item?.content;
-      if (!Array.isArray(content)) continue;
-
-      for (const c of content) {
-        const t1 = typeof c?.text === "string" ? c.text : "";
-        const t2 = typeof c?.output_text === "string" ? c.output_text : "";
-        const t3 = typeof c?.value === "string" ? c.value : "";
-        const pick = (t1 || t2 || t3).trim();
-        if (pick) parts.push(pick);
-      }
-    }
-    const joined = parts.join("\n").trim();
-    if (joined) return joined;
-  }
-
-  return "";
-}
-
 export async function POST(req: Request) {
   try {
-    // ✅ HARD FAIL if key missing (this is usually the real problem on Render)
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
@@ -77,6 +52,7 @@ export async function POST(req: Request) {
     const supabase = await createSupabaseServerClient();
     const { data: auth } = await supabase.auth.getUser();
     const user = auth.user;
+
     if (!user) return NextResponse.json({ error: "not_logged_in" }, { status: 401 });
 
     const body = await req.json().catch(() => ({}));
@@ -196,41 +172,22 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey });
 
-    let assistantMessage = "";
+    // ✅ LAUNCH-SAFE: use stable chat model now
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: system },
+        ...recent.map((m: any) => ({ role: m.role, content: m.content })),
+      ],
+      temperature: 0.9,
+      max_tokens: 350,
+    });
 
-    // ✅ Try GPT-5-nano first (Responses API)
-    try {
-      const resp = await client.responses.create({
-        model: "gpt-5-nano",
-        input: [
-          { role: "system", content: system },
-          ...recent.map((m: any) => ({ role: m.role, content: m.content })),
-        ],
-        max_output_tokens: 350,
-      });
-
-      assistantMessage = extractAssistantText(resp);
-    } catch (e: any) {
-      // ✅ Fallback so you can LAUNCH even if gpt-5-nano is blocked
-      const msg = e?.message ?? "";
-      console.error("GPT-5-nano failed, falling back:", msg);
-
-      const completion = await client.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: system },
-          ...recent.map((m: any) => ({ role: m.role, content: m.content })),
-        ],
-        temperature: 0.9,
-        max_tokens: 350,
-      });
-
-      assistantMessage = completion.choices?.[0]?.message?.content?.trim?.() ?? "";
-    }
+    const assistantMessage = completion.choices?.[0]?.message?.content?.trim?.() ?? "";
 
     if (!assistantMessage) {
       return NextResponse.json(
-        { error: "empty_reply", details: "No text returned. This is almost always: bad OPENAI_API_KEY or no model access." },
+        { error: "empty_reply", details: "OpenAI returned empty text. (Usually model/account issue)" },
         { status: 500 }
       );
     }
@@ -249,7 +206,6 @@ export async function POST(req: Request) {
       assistantMessage,
       premiumAccess,
       freeDailyLimit: FREE_DAILY_LIMIT,
-      modelUsed: assistantMessage ? "ok" : "none",
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? "server_error" }, { status: 500 });
