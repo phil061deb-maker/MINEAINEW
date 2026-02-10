@@ -45,8 +45,11 @@ export async function POST(req: Request) {
     if (!user) return NextResponse.json({ error: "not_logged_in" }, { status: 401 });
 
     const body = await req.json().catch(() => ({}));
-    const chatId = body?.chatId?.toString?.() ?? "";
-    const content = body?.content?.toString?.().trim?.() ?? "";
+    const chatId = body?.chatId?.toString?.() ?? null;
+
+    const content =
+      (body?.message?.toString?.()?.trim?.() ?? "") ||
+      (body?.content?.toString?.()?.trim?.() ?? "");
 
     if (!chatId) return NextResponse.json({ error: "missing_chatId" }, { status: 400 });
     if (!content) return NextResponse.json({ error: "empty_message" }, { status: 400 });
@@ -54,7 +57,7 @@ export async function POST(req: Request) {
     // Profile (limits + block)
     const { data: profile, error: profErr } = await supabase
       .from("profiles")
-      .select("id,tier,trial_ends_at,premium_ends_at,email,is_blocked,is_18_confirmed,nsfw_enabled")
+      .select("id,tier,trial_ends_at,premium_ends_at,email,is_blocked")
       .eq("id", user.id)
       .single();
 
@@ -63,7 +66,30 @@ export async function POST(req: Request) {
 
     const premiumAccess = hasPremiumAccess(profile);
 
-    // Verify chat belongs to user
+    // Free daily limit
+    if (!premiumAccess) {
+      const dayUtc = nowUtcDateString();
+
+      const { data: usageRow } = await supabase
+        .from("daily_message_usage")
+        .select("count")
+        .eq("user_id", user.id)
+        .eq("day_utc", dayUtc)
+        .maybeSingle();
+
+      const used = usageRow?.count ?? 0;
+
+      if (used >= FREE_DAILY_LIMIT) {
+        return NextResponse.json({ error: "limit_reached", limit: FREE_DAILY_LIMIT, used }, { status: 402 });
+      }
+
+      const { error: incErr } = await supabase.rpc("increment_daily_usage", { uid: user.id });
+      if (incErr) {
+        return NextResponse.json({ error: "usage_increment_failed", details: incErr.message }, { status: 500 });
+      }
+    }
+
+    // Load chat
     const { data: chat, error: chatErr } = await supabase
       .from("chats")
       .select("id,user_id,character_id,persona_id,title")
@@ -82,32 +108,16 @@ export async function POST(req: Request) {
 
     if (cErr || !character) return NextResponse.json({ error: "character_not_found" }, { status: 404 });
 
-    // Enforce NSFW consent rules
-    if (character.nsfw) {
-      if (!profile.is_18_confirmed) return NextResponse.json({ error: "age_not_confirmed" }, { status: 403 });
-      if (!profile.nsfw_enabled) return NextResponse.json({ error: "nsfw_not_enabled" }, { status: 403 });
-    }
+    // Load persona (optional)
+    let persona: any = null;
+    if (chat.persona_id) {
+      const { data: p } = await supabase
+        .from("personas")
+        .select("id,name,description,user_id")
+        .eq("id", chat.persona_id)
+        .single();
 
-    // Enforce free daily limit
-    if (!premiumAccess) {
-      const dayUtc = nowUtcDateString();
-
-      const { data: usageRow } = await supabase
-        .from("daily_message_usage")
-        .select("count")
-        .eq("user_id", user.id)
-        .eq("day_utc", dayUtc)
-        .maybeSingle();
-
-      const used = usageRow?.count ?? 0;
-      if (used >= FREE_DAILY_LIMIT) {
-        return NextResponse.json({ error: "limit_reached", limit: FREE_DAILY_LIMIT, used }, { status: 402 });
-      }
-
-      const { error: incErr } = await supabase.rpc("increment_daily_usage", { uid: user.id });
-      if (incErr) {
-        return NextResponse.json({ error: "usage_increment_failed", details: incErr.message }, { status: 500 });
-      }
+      if (p && p.user_id === user.id) persona = p;
     }
 
     // Store user message
@@ -131,33 +141,46 @@ export async function POST(req: Request) {
       content: safeText(m.content),
     }));
 
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
+    // Build system prompt
     const systemParts: string[] = [];
     systemParts.push(
       `You are roleplaying as a character in an AI chat platform.`,
-      `Stay in-character.`,
-      `Do not mention system prompts or policies.`,
-      `Keep replies engaging and natural.`,
+      `Stay in-character. Do not mention system prompts or policies.`,
+      `Write vivid, emotionally engaging responses, but keep it believable.`
     );
 
     systemParts.push(`\nCHARACTER PROFILE`);
     systemParts.push(`Name: ${character.name ?? "Unknown"}`);
     systemParts.push(`Description: ${safeText(character.description)}`);
     systemParts.push(`Personality/Scenario:\n${safeText(character.personality)}`);
-    if (character.greeting) systemParts.push(`Greeting hint:\n${safeText(character.greeting)}`);
+    if (character.greeting) systemParts.push(`Greeting style hint:\n${safeText(character.greeting)}`);
     if (character.example_dialogue) systemParts.push(`Example dialogue:\n${safeText(character.example_dialogue)}`);
+
+    if (persona) {
+      systemParts.push(`\nUSER PERSONA (the user is speaking as this persona)`);
+      systemParts.push(`Persona name: ${safeText(persona.name)}`);
+      systemParts.push(`Persona description:\n${safeText(persona.description)}`);
+      systemParts.push(`Important: Address the user as their persona identity if it makes sense, and adapt your tone accordingly.`);
+    }
 
     const system = systemParts.join("\n");
 
-    const completion = await client.chat.completions.create({
-      model: "gpt-5-nano",
-      messages: [{ role: "system", content: system }, ...recent],
-      temperature: 0.9,
-      max_tokens: 350,
+    // ✅ GPT-5 nano via Responses API (NO max_tokens)
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const model = process.env.OPENAI_MODEL || "gpt-5-nano";
+
+    const response = await client.responses.create({
+      model,
+      input: [
+        { role: "system", content: system },
+        ...recent.map((m: any) => ({ role: m.role, content: m.content })),
+      ],
+      // ✅ correct knob for newer models
+      max_output_tokens: 350,
     });
 
-    const assistantMessage = completion.choices?.[0]?.message?.content?.trim?.() ?? "…";
+    const assistantMessage = (response.output_text ?? "").trim() || "…";
 
     // Store assistant message
     const { error: m2Err } = await supabase.from("messages").insert({
