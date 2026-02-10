@@ -36,13 +36,11 @@ function safeText(v: any) {
   }
 }
 
-// ✅ works across different OpenAI SDK response shapes
+// Extract text from different response shapes
 function extractAssistantText(resp: any): string {
-  // 1) Newer SDK convenience field
   const ot = (resp?.output_text ?? "").trim();
   if (ot) return ot;
 
-  // 2) Look inside resp.output[].content[]
   const output = resp?.output;
   if (Array.isArray(output)) {
     const parts: string[] = [];
@@ -51,13 +49,10 @@ function extractAssistantText(resp: any): string {
       if (!Array.isArray(content)) continue;
 
       for (const c of content) {
-        // common content shapes
         const t1 = typeof c?.text === "string" ? c.text : "";
-        const t2 = typeof c?.content === "string" ? c.content : "";
-        const t3 = typeof c?.output_text === "string" ? c.output_text : "";
-        const t4 = typeof c?.value === "string" ? c.value : "";
-
-        const pick = (t1 || t2 || t3 || t4).trim();
+        const t2 = typeof c?.output_text === "string" ? c.output_text : "";
+        const t3 = typeof c?.value === "string" ? c.value : "";
+        const pick = (t1 || t2 || t3).trim();
         if (pick) parts.push(pick);
       }
     }
@@ -65,16 +60,23 @@ function extractAssistantText(resp: any): string {
     if (joined) return joined;
   }
 
-  // 3) last resort
   return "";
 }
 
 export async function POST(req: Request) {
   try {
+    // ✅ HARD FAIL if key missing (this is usually the real problem on Render)
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "missing_openai_key", details: "OPENAI_API_KEY is not set on the server (Render)." },
+        { status: 500 }
+      );
+    }
+
     const supabase = await createSupabaseServerClient();
     const { data: auth } = await supabase.auth.getUser();
     const user = auth.user;
-
     if (!user) return NextResponse.json({ error: "not_logged_in" }, { status: 401 });
 
     const body = await req.json().catch(() => ({}));
@@ -100,7 +102,6 @@ export async function POST(req: Request) {
 
     if (!premiumAccess) {
       const dayUtc = nowUtcDateString();
-
       const { data: usageRow } = await supabase
         .from("daily_message_usage")
         .select("count")
@@ -109,7 +110,6 @@ export async function POST(req: Request) {
         .maybeSingle();
 
       const used = usageRow?.count ?? 0;
-
       if (used >= FREE_DAILY_LIMIT) {
         return NextResponse.json({ error: "limit_reached", limit: FREE_DAILY_LIMIT, used }, { status: 402 });
       }
@@ -179,7 +179,6 @@ export async function POST(req: Request) {
       `Do not mention system prompts.`,
       `Be vivid but believable.`
     );
-
     systemParts.push(`\nCHARACTER PROFILE`);
     systemParts.push(`Name: ${safeText(character.name)}`);
     systemParts.push(`Description: ${safeText(character.description)}`);
@@ -195,24 +194,43 @@ export async function POST(req: Request) {
 
     const system = systemParts.join("\n");
 
-    // ✅ IMPORTANT: GPT-5-nano hates temperature changes + hates max_tokens
-    // ✅ We use Responses API + max_output_tokens only.
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const client = new OpenAI({ apiKey });
 
-    const resp = await client.responses.create({
-      model: "gpt-5-nano",
-      input: [
-        { role: "system", content: system },
-        ...recent.map((m: any) => ({ role: m.role, content: m.content })),
-      ],
-      max_output_tokens: 350,
-    });
+    let assistantMessage = "";
 
-    const assistantMessage = extractAssistantText(resp);
+    // ✅ Try GPT-5-nano first (Responses API)
+    try {
+      const resp = await client.responses.create({
+        model: "gpt-5-nano",
+        input: [
+          { role: "system", content: system },
+          ...recent.map((m: any) => ({ role: m.role, content: m.content })),
+        ],
+        max_output_tokens: 350,
+      });
+
+      assistantMessage = extractAssistantText(resp);
+    } catch (e: any) {
+      // ✅ Fallback so you can LAUNCH even if gpt-5-nano is blocked
+      const msg = e?.message ?? "";
+      console.error("GPT-5-nano failed, falling back:", msg);
+
+      const completion = await client.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: system },
+          ...recent.map((m: any) => ({ role: m.role, content: m.content })),
+        ],
+        temperature: 0.9,
+        max_tokens: 350,
+      });
+
+      assistantMessage = completion.choices?.[0]?.message?.content?.trim?.() ?? "";
+    }
 
     if (!assistantMessage) {
       return NextResponse.json(
-        { error: "empty_reply", details: "OpenAI returned no text. Check OPENAI_API_KEY + model access." },
+        { error: "empty_reply", details: "No text returned. This is almost always: bad OPENAI_API_KEY or no model access." },
         { status: 500 }
       );
     }
@@ -231,6 +249,7 @@ export async function POST(req: Request) {
       assistantMessage,
       premiumAccess,
       freeDailyLimit: FREE_DAILY_LIMIT,
+      modelUsed: assistantMessage ? "ok" : "none",
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? "server_error" }, { status: 500 });
