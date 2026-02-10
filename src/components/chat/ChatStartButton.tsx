@@ -15,7 +15,6 @@ export default function ChatStartButton({
     <button
       className={className ?? "btn-primary"}
       onClick={async () => {
-        // ✅ ensure expects characterId
         const res = await fetch("/api/chat/ensure", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -28,7 +27,6 @@ export default function ChatStartButton({
           return;
         }
 
-        // ✅ go to chat by chatId returned
         router.push(`/chat/${json.chatId}`);
         router.refresh();
       }}
