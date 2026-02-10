@@ -3,7 +3,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { getCharacterImage } from "@/lib/supabase/storage";
+
+type Msg = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+};
+
+function publicImageUrl(path: string | null) {
+  if (!path) return null;
+  const base = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  return `${base}/storage/v1/object/public/character-images/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
+}
+
+function uid() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
 
 export default function ChatPage() {
   const params = useParams<{ chatId: string }>();
@@ -12,11 +27,10 @@ export default function ChatPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
 
   const [loading, setLoading] = useState(true);
-  const [header, setHeader] = useState<{ name: string; image: string | null; characterId: string | null } | null>(null);
-
+  const [header, setHeader] = useState<{ name: string; image: string | null } | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
 
+  const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
 
@@ -54,28 +68,35 @@ export default function ChatPage() {
       return;
     }
 
+    // Fetch character for header
     const { data: character } = await supabase
       .from("characters")
-      .select("id,name,image_path")
+      .select("name,image_path")
       .eq("id", chat.character_id)
       .single();
 
     setHeader({
       name: character?.name ?? chat.title ?? "Chat",
-      image: getCharacterImage(character?.image_path ?? null),
-      characterId: character?.id ?? chat.character_id ?? null,
+      image: publicImageUrl(character?.image_path ?? null),
     });
 
-    // Load history
+    // Load messages from history endpoint
     try {
-      const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(chatId)}`, { cache: "no-store" });
+      const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(chatId!)}`, { cache: "no-store" });
       const json = await res.json();
 
       if (!res.ok) {
         setHistoryError(json?.error ?? "history_failed");
         setMessages([]);
       } else {
-        setMessages(Array.isArray(json?.messages) ? json.messages : []);
+        const arr = Array.isArray(json?.messages) ? json.messages : [];
+        // normalize to Msg with ids
+        const normalized: Msg[] = arr.map((m: any) => ({
+          id: uid(),
+          role: m.role,
+          content: String(m.content ?? ""),
+        }));
+        setMessages(normalized);
       }
     } catch {
       setHistoryError("history_failed");
@@ -93,29 +114,51 @@ export default function ChatPage() {
 
   async function send() {
     const text = input.trim();
-    if (!text) return;
+    if (!text || !chatId || sending) return;
 
     setSending(true);
     setInput("");
 
-    setMessages((m) => [...m, { role: "user", content: text }]);
+    const userMsg: Msg = { id: uid(), role: "user", content: text };
+    const thinkingId = uid();
+    const thinkingMsg: Msg = { id: thinkingId, role: "assistant", content: "…" };
+
+    // Add user + thinking bubble
+    setMessages((m) => [...m, userMsg, thinkingMsg]);
 
     try {
       const res = await fetch("/api/chat/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId, content: text }), // IMPORTANT: send `content`
+        body: JSON.stringify({ chatId, message: text }),
       });
 
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
 
+      // If server fails -> replace thinking with error text
       if (!res.ok) {
-        setMessages((m) => [...m, { role: "assistant", content: `Error: ${json?.error ?? "send_failed"}` }]);
-      } else {
-        setMessages((m) => [...m, { role: "assistant", content: json?.assistantMessage ?? json?.reply ?? "…" }]);
+        const errText = `Error: ${json?.error ?? "send_failed"}`;
+        setMessages((m) => m.map((x) => (x.id === thinkingId ? { ...x, content: errText } : x)));
+        setSending(false);
+        return;
       }
+
+      // Get reply text
+      const reply =
+        (typeof json?.assistantMessage === "string" && json.assistantMessage) ||
+        (typeof json?.reply === "string" && json.reply) ||
+        "";
+
+      if (!reply) {
+        setMessages((m) => m.map((x) => (x.id === thinkingId ? { ...x, content: "Error: empty_reply" } : x)));
+        setSending(false);
+        return;
+      }
+
+      // Replace thinking bubble with reply
+      setMessages((m) => m.map((x) => (x.id === thinkingId ? { ...x, content: reply } : x)));
     } catch {
-      setMessages((m) => [...m, { role: "assistant", content: "Network error sending message." }]);
+      setMessages((m) => m.map((x) => (x.id === thinkingId ? { ...x, content: "Error: network_error" } : x)));
     }
 
     setSending(false);
@@ -145,7 +188,9 @@ export default function ChatPage() {
           <div className="min-w-0">
             <div className="text-xs text-zinc-400">Chatting with</div>
             <div className="font-semibold truncate">{header?.name ?? "Chat"}</div>
-            {historyError && <div className="text-xs text-amber-300 mt-1">History error: {historyError}</div>}
+            {historyError && (
+              <div className="text-xs text-amber-300 mt-1">History error: {historyError}</div>
+            )}
           </div>
         </div>
 
@@ -153,29 +198,6 @@ export default function ChatPage() {
           <span className="px-3 py-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 text-emerald-200 text-xs">
             ● Live
           </span>
-
-          <button
-            className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
-            onClick={async () => {
-              // Create a new chat for SAME character, keep old chats
-              const res = await fetch("/api/chat/new", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  chatId, // we pass current chatId, API will derive character_id
-                  keepPersona: true,
-                }),
-              });
-
-              const json = await res.json();
-              if (!res.ok) return alert(json?.error ?? "failed");
-
-              router.push(`/chat/${json.chatId}`);
-              router.refresh();
-            }}
-          >
-            New Chat
-          </button>
 
           <button
             className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
@@ -188,8 +210,8 @@ export default function ChatPage() {
 
       <div className="rounded-[28px] border border-white/10 bg-black/30 backdrop-blur-xl p-5 min-h-[420px]">
         <div className="space-y-4">
-          {messages.map((m, idx) => (
-            <div key={idx} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
+          {messages.map((m) => (
+            <div key={m.id} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
               <div
                 className={
                   m.role === "user"
@@ -220,7 +242,6 @@ export default function ChatPage() {
           }}
           disabled={sending}
         />
-
         <button
           className="px-6 py-3 rounded-2xl bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-60"
           onClick={send}
