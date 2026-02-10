@@ -20,6 +20,17 @@ function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+async function fetchWithTimeout(url: string, options: RequestInit, ms: number) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export default function ChatPage() {
   const params = useParams<{ chatId: string }>();
   const chatId = params?.chatId;
@@ -45,7 +56,6 @@ export default function ChatPage() {
       return;
     }
 
-    // Fetch chat
     const { data: chat, error: chatErr } = await supabase
       .from("chats")
       .select("id, user_id, character_id, persona_id, title")
@@ -68,7 +78,6 @@ export default function ChatPage() {
       return;
     }
 
-    // Fetch character for header
     const { data: character } = await supabase
       .from("characters")
       .select("name,image_path")
@@ -80,7 +89,6 @@ export default function ChatPage() {
       image: publicImageUrl(character?.image_path ?? null),
     });
 
-    // Load messages from history endpoint
     try {
       const res = await fetch(`/api/chat/history?chatId=${encodeURIComponent(chatId!)}`, { cache: "no-store" });
       const json = await res.json();
@@ -90,13 +98,13 @@ export default function ChatPage() {
         setMessages([]);
       } else {
         const arr = Array.isArray(json?.messages) ? json.messages : [];
-        // normalize to Msg with ids
-        const normalized: Msg[] = arr.map((m: any) => ({
-          id: uid(),
-          role: m.role,
-          content: String(m.content ?? ""),
-        }));
-        setMessages(normalized);
+        setMessages(
+          arr.map((m: any) => ({
+            id: uid(),
+            role: m.role,
+            content: String(m.content ?? ""),
+          }))
+        );
       }
     } catch {
       setHistoryError("history_failed");
@@ -123,42 +131,41 @@ export default function ChatPage() {
     const thinkingId = uid();
     const thinkingMsg: Msg = { id: thinkingId, role: "assistant", content: "…" };
 
-    // Add user + thinking bubble
     setMessages((m) => [...m, userMsg, thinkingMsg]);
 
     try {
-      const res = await fetch("/api/chat/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId, message: text }),
-      });
+      const res = await fetchWithTimeout(
+        "/api/chat/send",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chatId, message: text }),
+        },
+        25000 // 25 seconds
+      );
 
       const json = await res.json().catch(() => ({}));
 
-      // If server fails -> replace thinking with error text
       if (!res.ok) {
-        const errText = `Error: ${json?.error ?? "send_failed"}`;
-        setMessages((m) => m.map((x) => (x.id === thinkingId ? { ...x, content: errText } : x)));
+        setMessages((m) =>
+          m.map((x) => (x.id === thinkingId ? { ...x, content: `Error: ${json?.error ?? "send_failed"}` } : x))
+        );
         setSending(false);
         return;
       }
 
-      // Get reply text
       const reply =
         (typeof json?.assistantMessage === "string" && json.assistantMessage) ||
         (typeof json?.reply === "string" && json.reply) ||
         "";
 
-      if (!reply) {
-        setMessages((m) => m.map((x) => (x.id === thinkingId ? { ...x, content: "Error: empty_reply" } : x)));
-        setSending(false);
-        return;
-      }
-
-      // Replace thinking bubble with reply
-      setMessages((m) => m.map((x) => (x.id === thinkingId ? { ...x, content: reply } : x)));
+      setMessages((m) =>
+        m.map((x) => (x.id === thinkingId ? { ...x, content: reply || "Error: empty_reply" } : x))
+      );
     } catch {
-      setMessages((m) => m.map((x) => (x.id === thinkingId ? { ...x, content: "Error: network_error" } : x)));
+      setMessages((m) =>
+        m.map((x) => (x.id === thinkingId ? { ...x, content: "Error: timeout_or_network" } : x))
+      );
     }
 
     setSending(false);
@@ -188,9 +195,7 @@ export default function ChatPage() {
           <div className="min-w-0">
             <div className="text-xs text-zinc-400">Chatting with</div>
             <div className="font-semibold truncate">{header?.name ?? "Chat"}</div>
-            {historyError && (
-              <div className="text-xs text-amber-300 mt-1">History error: {historyError}</div>
-            )}
+            {historyError && <div className="text-xs text-amber-300 mt-1">History error: {historyError}</div>}
           </div>
         </div>
 
@@ -198,7 +203,6 @@ export default function ChatPage() {
           <span className="px-3 py-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 text-emerald-200 text-xs">
             ● Live
           </span>
-
           <button
             className="px-4 py-2 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
             onClick={() => router.back()}

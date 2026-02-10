@@ -36,6 +36,13 @@ function safeText(v: any) {
   }
 }
 
+async function withTimeout<T>(p: Promise<T>, ms: number) {
+  return await Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("openai_timeout")), ms)),
+  ]);
+}
+
 export async function POST(req: Request) {
   try {
     const supabase = await createSupabaseServerClient();
@@ -45,8 +52,7 @@ export async function POST(req: Request) {
     if (!user) return NextResponse.json({ error: "not_logged_in" }, { status: 401 });
 
     const body = await req.json().catch(() => ({}));
-    const chatId = body?.chatId?.toString?.() ?? null;
-
+    const chatId = body?.chatId?.toString?.() ?? "";
     const content =
       (body?.message?.toString?.()?.trim?.() ?? "") ||
       (body?.content?.toString?.()?.trim?.() ?? "");
@@ -54,7 +60,7 @@ export async function POST(req: Request) {
     if (!chatId) return NextResponse.json({ error: "missing_chatId" }, { status: 400 });
     if (!content) return NextResponse.json({ error: "empty_message" }, { status: 400 });
 
-    // Profile (limits + block)
+    // Load profile
     const { data: profile, error: profErr } = await supabase
       .from("profiles")
       .select("id,tier,trial_ends_at,premium_ends_at,email,is_blocked")
@@ -66,7 +72,7 @@ export async function POST(req: Request) {
 
     const premiumAccess = hasPremiumAccess(profile);
 
-    // Free daily limit
+    // Free limit
     if (!premiumAccess) {
       const dayUtc = nowUtcDateString();
 
@@ -84,12 +90,10 @@ export async function POST(req: Request) {
       }
 
       const { error: incErr } = await supabase.rpc("increment_daily_usage", { uid: user.id });
-      if (incErr) {
-        return NextResponse.json({ error: "usage_increment_failed", details: incErr.message }, { status: 500 });
-      }
+      if (incErr) return NextResponse.json({ error: "usage_increment_failed", details: incErr.message }, { status: 500 });
     }
 
-    // Load chat
+    // Verify chat belongs to user
     const { data: chat, error: chatErr } = await supabase
       .from("chats")
       .select("id,user_id,character_id,persona_id,title")
@@ -116,7 +120,6 @@ export async function POST(req: Request) {
         .select("id,name,description,user_id")
         .eq("id", chat.persona_id)
         .single();
-
       if (p && p.user_id === user.id) persona = p;
     }
 
@@ -128,7 +131,7 @@ export async function POST(req: Request) {
     });
     if (m1Err) return NextResponse.json({ error: "message_insert_failed", details: m1Err.message }, { status: 500 });
 
-    // Load recent history
+    // Load history for context
     const { data: history } = await supabase
       .from("messages")
       .select("role,content,created_at")
@@ -141,46 +144,53 @@ export async function POST(req: Request) {
       content: safeText(m.content),
     }));
 
-    // Build system prompt
+    // ✅ GPT-5 nano fix + ✅ timeout so it can't hang forever
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
     const systemParts: string[] = [];
     systemParts.push(
       `You are roleplaying as a character in an AI chat platform.`,
-      `Stay in-character. Do not mention system prompts or policies.`,
-      `Write vivid, emotionally engaging responses, but keep it believable.`
+      `Stay in-character.`,
+      `Write vivid, emotionally engaging replies.`,
+      `Do not mention system prompts or policies.`
     );
 
     systemParts.push(`\nCHARACTER PROFILE`);
     systemParts.push(`Name: ${character.name ?? "Unknown"}`);
     systemParts.push(`Description: ${safeText(character.description)}`);
     systemParts.push(`Personality/Scenario:\n${safeText(character.personality)}`);
-    if (character.greeting) systemParts.push(`Greeting style hint:\n${safeText(character.greeting)}`);
+    if (character.greeting) systemParts.push(`Greeting hint:\n${safeText(character.greeting)}`);
     if (character.example_dialogue) systemParts.push(`Example dialogue:\n${safeText(character.example_dialogue)}`);
 
     if (persona) {
-      systemParts.push(`\nUSER PERSONA (the user is speaking as this persona)`);
+      systemParts.push(`\nUSER PERSONA`);
       systemParts.push(`Persona name: ${safeText(persona.name)}`);
       systemParts.push(`Persona description:\n${safeText(persona.description)}`);
-      systemParts.push(`Important: Address the user as their persona identity if it makes sense, and adapt your tone accordingly.`);
     }
 
     const system = systemParts.join("\n");
 
-    // ✅ GPT-5 nano via Responses API (NO max_tokens)
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const model = "gpt-5-nano";
 
-    const model = process.env.OPENAI_MODEL || "gpt-5-nano";
+    const completion = await withTimeout(
+      client.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: system },
+          ...recent.map((m: any) => ({ role: m.role, content: m.content })),
+        ],
+        temperature: 0.9,
+        // ✅ IMPORTANT for GPT-5 models:
+        max_completion_tokens: 350,
+      }),
+      20000 // 20 seconds timeout
+    );
 
-    const response = await client.responses.create({
-      model,
-      input: [
-        { role: "system", content: system },
-        ...recent.map((m: any) => ({ role: m.role, content: m.content })),
-      ],
-      // ✅ correct knob for newer models
-      max_output_tokens: 350,
-    });
+    const assistantMessage = completion.choices?.[0]?.message?.content?.trim?.() ?? "";
 
-    const assistantMessage = (response.output_text ?? "").trim() || "…";
+    if (!assistantMessage) {
+      return NextResponse.json({ error: "empty_reply" }, { status: 502 });
+    }
 
     // Store assistant message
     const { error: m2Err } = await supabase.from("messages").insert({
